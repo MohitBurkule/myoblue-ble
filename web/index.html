@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+<meta name="description" content="Record EMG from ELEMYO MYOblue sensors over Bluetooth, straight from the browser.">
+<title>MYOblue Recorder</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="appbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 17h6l3-9 4 17 4-13 2 5h7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>MYOblue Recorder</span>
+  </div>
+  <div id="recBadge" class="rec-badge" hidden><span class="rec-dot"></span><span id="recTime">00:00</span></div>
+  <button id="settingsBtn" class="icon-btn" aria-label="Display settings" title="Display settings">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
+</header>
+
+<div id="banner" class="banner" role="status" hidden></div>
+
+<section id="settings" class="settings" hidden>
+  <label>View
+    <select id="viewMode">
+      <option value="filtered">Filtered EMG</option>
+      <option value="raw">Raw EMG</option>
+      <option value="envelope">Envelope (RMS)</option>
+    </select>
+  </label>
+  <label>Mains notch
+    <select id="notch"><option value="0">Off</option><option value="50">50 Hz</option><option value="60">60 Hz</option></select>
+  </label>
+  <label>High-pass
+    <select id="hp"><option value="0">Off</option><option value="10">10 Hz</option><option value="20">20 Hz</option></select>
+  </label>
+  <label>Time window
+    <select id="win"><option value="2">2 s</option><option value="5">5 s</option><option value="10">10 s</option></select>
+  </label>
+  <label>Scale
+    <select id="scale"><option value="0">Auto</option><option value="100">±100 µV</option><option value="250">±250 µV</option><option value="500">±500 µV</option><option value="1000">±1 mV</option><option value="2500">±2.5 mV</option></select>
+  </label>
+  <label class="wide">Marker labels <input id="markerLabels" type="text" placeholder="rest, contract, trial" autocomplete="off"></label>
+</section>
+
+<main>
+  <section id="sensors" class="sensors" aria-label="Sensors"></section>
+
+  <section id="empty" class="empty">
+    <h1>Connect your MYOblue sensors</h1>
+    <ol>
+      <li>Unplug the USB dongle if it is connected to a computer nearby. It grabs the sensors first.</li>
+      <li>Switch a sensor on. Its light blinks while it waits for a connection.</li>
+      <li>Tap <b>Add sensor</b> and pick it from the list. Repeat for each sensor.</li>
+    </ol>
+    <p class="muted">Works in Chrome on Android and in Chrome or Edge on a computer. On iPhone use the Bluefy browser.</p>
+    <div class="row">
+      <button class="btn primary" data-action="connect">Add sensor</button>
+      <button class="btn" data-action="demo">Try a demo sensor</button>
+    </div>
+  </section>
+
+  <section class="recordings" aria-labelledby="recHead">
+    <div class="section-head">
+      <h2 id="recHead">Recordings</h2>
+      <span id="storage" class="muted small"></span>
+    </div>
+    <ul id="recList" class="rec-list"></ul>
+    <p id="recEmpty" class="muted small">Recordings are saved in this browser as you record, so a crash or closed tab keeps what was captured. Download them to keep a copy.</p>
+  </section>
+</main>
+
+<nav class="actionbar" aria-label="Actions">
+  <div class="idle-actions">
+    <button class="btn" data-action="connect">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      Add sensor</button>
+    <button class="btn" data-action="calibrate" disabled>Calibrate</button>
+    <button class="btn record" data-action="record" disabled><span class="rec-dot"></span>Record</button>
+  </div>
+  <div class="rec-actions" hidden>
+    <div id="markerChips" class="chips"></div>
+    <button class="btn stop" data-action="stop"><span class="stop-sq"></span>Stop</button>
+  </div>
+</nav>
+
+<dialog id="recDialog" class="sheet">
+  <form method="dialog">
+    <h2>New recording</h2>
+    <label>Name <input id="recName" type="text" required autocomplete="off"></label>
+    <label>Notes <textarea id="recNotes" rows="3" placeholder="Muscle, electrode placement, subject, task…"></textarea></label>
+    <p id="recCalNote" class="muted small"></p>
+    <div class="row end">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn record" value="start"><span class="rec-dot"></span>Start recording</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="calDialog" class="sheet">
+  <div class="cal">
+    <h2 id="calTitle">Calibrate</h2>
+    <div id="calBody"></div>
+    <div class="cal-progress" hidden><div class="bar"><span id="calBar"></span></div><div id="calCount" class="count"></div></div>
+    <div id="calButtons" class="row end"></div>
+  </div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
