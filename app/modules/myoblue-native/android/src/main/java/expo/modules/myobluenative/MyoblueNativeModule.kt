@@ -51,8 +51,8 @@ class MyoblueNativeModule : Module() {
       MyoBle.ignoringBatteryOptimizations(context)
     }
     Function("openBatterySettings") {
-      appContext.reactContext?.let { MyoBle.openBatterySettings(it) }
-      null
+      val context = appContext.reactContext
+      if (context != null) MyoBle.openBatterySettings(context)
     }
   }
 }
