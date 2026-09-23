@@ -67,7 +67,9 @@ function summarize(dir: Directory): SessionSummary | null {
 
 export function listSessions(): SessionSummary[] {
   const out: SessionSummary[] = [];
-  for (const item of recordingsDir().list()) {
+  let items: ReturnType<Directory["list"]> = [];
+  try { items = recordingsDir().list(); } catch { return out; } // no file system (web preview)
+  for (const item of items) {
     if (!(item instanceof Directory)) continue;
     const s = summarize(item);
     if (s) out.push(s);

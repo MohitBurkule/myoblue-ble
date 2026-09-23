@@ -58,7 +58,7 @@ export default function LiveScreen() {
           </View>
         ) : (
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Button title="Add sensor" style={{ flex: 1 }} onPress={() => router.push("/scan")} />
+            <Button title="+ Sensor" style={{ flex: 1 }} onPress={() => router.push("/scan")} />
             <Button title="Calibrate" style={{ flex: 1 }} disabled={!anyLive} onPress={() => router.push("/calibrate")} />
             <Button title="● Record" variant="record" style={{ flex: 1.2 }} disabled={!sensors.length || !nativeAvailable} onPress={() => router.push("/record")} />
           </View>

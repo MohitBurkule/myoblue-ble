@@ -6,11 +6,29 @@ The sensors are ordinary Bluetooth LE devices. The dongle is just a relay that f
 
 | Path | What it is |
 | --- | --- |
+| [`app/`](app/) | **Android app** (Expo / React Native + a small Kotlin module): records in the background (screen off, calls, other apps), live view, calibration, per-marker analysis, CSV/JSON export. APK on the [Releases page](https://github.com/MohitBurkule/myoblue-ble/releases/latest) |
 | [`web/`](web/) | **MYOblue Recorder**, a web app for phones and computers: live view, calibration, recording, CSV export. Live at **https://mohitburkule.github.io/myoblue-ble/** |
 | [`bridge/`](bridge/) | Software dongle for a computer: connects to the sensors over Bluetooth and serves the dongle's byte stream on a virtual serial port, so ELEMYO's `MYOblue_GUI.py` works unmodified |
 | [`tools/`](tools/) | `fake_sensor.py` (pretend to be a sensor, e.g. to inspect the real dongle) and `web_selftest.mjs` (end-to-end test of the web app in headless Chrome) |
 
 A fork of ELEMYO's GUI with built-in Bluetooth support (no bridge needed) is at [MohitBurkule/MYOblue-GUI](https://github.com/MohitBurkule/MYOblue-GUI).
+
+## Android app
+
+**Install:** open the [latest release](https://github.com/MohitBurkule/myoblue-ble/releases/latest) on the phone, download `myoblue-N.apk` and open it. Android asks once to allow installs from your browser or file manager. Later builds install over the previous one and keep your recordings.
+
+**Why an app:** a web page stops when the phone locks or a call comes in. The app records in an Android *foreground service* (the ongoing notification with **Mark** and **Stop**). The Bluetooth connections and the file writing are native Kotlin inside that service, so recording doesn't depend on the UI at all. Settings → Background recording can exclude the app from battery optimisation for phones that are aggressive about it.
+
+**What it does:**
+- **Live:** filtered, raw or envelope view; the same signal presets as the web app (EMG, Wide as in MYOblue GUI, ECG); optional spectrum; auto, peak-hold, calibrated or fixed Y axis; effort meter.
+- **Calibration:** 5 s rest + 5 s maximum contraction. Gives % MVC, an activity threshold and a signal-to-noise verdict per sensor.
+- **Recording:** name, notes and marker buttons (from the app or the notification). Sensors reconnect automatically if they drop out.
+- **Analysis:** an overview of each whole recording with markers, a zoomable detail view, a filter preset you can change after recording, and stats per marker segment (mean and peak % MVC, time active).
+- **Export:** the same CSV and JSON as the web app, via the Android share sheet.
+
+**On disk** (`recordings/<id>/` in the app's files): `session.json` (name, notes, calibration), one append-only `<sensor>.bin` per sensor (per packet: float64 ms since start + the raw 244 bytes), `markers.jsonl`, `sensors.json`, and `status.json` (written on stop; if it's missing, the recording was interrupted and everything up to that point is still readable).
+
+**Build:** GitHub Actions ([`.github/workflows/android.yml`](.github/workflows/android.yml)) runs the typecheck and unit tests, then `expo prebuild`, a Gradle release build, and signing with the key stored in repo secrets; it publishes a release. Nothing needs installing locally. Locally: `cd app && npm ci --legacy-peer-deps && npm test && npx tsc --noEmit`.
 
 ## Web app
 
@@ -59,7 +77,7 @@ The bridge writes `[0xFF, 0xFF] + packet` to a pty, byte-for-byte what the dongl
 Measured with the dongle and an HCI trace (`btmon`), and cross-checked against the datasheet.
 
 - **Advertising:** `N_MYOblue_v1.2_XXXXX` (N = module number), static random address, Nordic UART Service UUID `6e400001-b5a3-f393-e0a9-e50e24dcca9e` in the scan response. Advertising is *limited discoverable*: an unconnected sensor goes quiet after a few minutes, so power-cycle it.
-- **Data:** notifications on TX `6e400003-…`, 244 bytes each: module (u8), sequence (u24 LE), battery (u16 LE, V = raw / 16384 × 7.2), then 119 samples (u16 LE, 14-bit, 8192 = 0 V; µV = (raw − 8192) × 0.30518, as in MYOblue_GUI). 1000 samples/s, about 8.4 packets/s.
+- **Data:** notifications on TX `6e400003-…`, 244 bytes each: module (u8), sequence (u24 LE), battery (u16 LE, V = raw / 16384 × 7.2), then 119 samples (u16 LE, 14-bit, 8192 = 0 V; µV = (raw − 8192) × 0.30518, as in MYOblue_GUI). Nominally 1000 samples/s, but the sensor clock runs 2–3% slow: about 975 samples/s, or 8.2 packets/s, the same with or without the dongle.
 - **Battery packet:** once a minute the sensor measures its battery instead of EMG and sends a packet whose samples are all 8192. The web app treats it as missing data.
 - **What the dongle does:** requests MTU 247 and data length 251, discovers NUS, and enables notifications. No pairing, bonding or writes. It connects to any device advertising that name and service; the sensors don't check the dongle's address.
 - **Dongle serial output:** `FF FF` + the 244-byte payload per packet; the baud rate is irrelevant (USB CDC). The dongle's USB serial number is its BLE address.

@@ -151,6 +151,9 @@ object MyoBle {
 
   private fun open(link: Link) {
     if (!link.wanted || link.gatt != null) return
+    // Before Android 13 a device can't be created with a random address type, so for a
+    // sensor not seen yet this session, scan: its advert triggers open() again (see scanCallback)
+    if (Build.VERSION.SDK_INT < 33 && !seen.containsKey(link.id)) { startScan(); retry(link, 5000); return }
     val dev = remoteDevice(link.id) ?: run { retry(link, 3000); return }
     setState(link, if (link.packets > 0) "reconnecting" else "connecting")
     try {

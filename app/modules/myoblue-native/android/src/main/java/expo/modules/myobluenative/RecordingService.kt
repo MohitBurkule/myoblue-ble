@@ -133,7 +133,7 @@ class RecordingService : Service() {
 
     fun stop(ctx: Context) {
       instance?.let {
-        it.stopForeground(STOP_FOREGROUND_REMOVE)
+        it.stopForeground(Service.STOP_FOREGROUND_REMOVE)
         it.stopSelf()
       } ?: ctx.stopService(Intent(ctx, RecordingService::class.java))
     }
