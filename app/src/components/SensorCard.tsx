@@ -24,6 +24,7 @@ export function SensorCard({ sensor, settings }: { sensor: LiveSensor; settings:
   const stalled = (sensor.state === "live" || sensor.state === "demo") && sensor.lastPacketAt > 0 && nowMs(sensor) - sensor.lastPacketAt > 2500;
   const [label, tone] = stalled ? (["No data", "warn"] as [string, Tone]) : STATE[sensor.state] ?? [sensor.state, "neutral"];
   const cal = sensor.cal;
+  const holding = settings.scale === "hold" || (settings.scale === "mvc" && !cal);
   const active = cal && sensor.envNow > cal.threshold && !stalled && (sensor.state === "live" || sensor.state === "demo");
   return (
     <Card>
@@ -36,6 +37,8 @@ export function SensorCard({ sensor, settings }: { sensor: LiveSensor; settings:
         <Pill text={label} tone={tone} />
         {active ? <Pill text="Active" color={color} /> : null}
         <Text style={{ color: t.muted, fontSize: 12, flex: 1 }} numberOfLines={1}>{sensor.source === "demo" ? "Simulated signal" : sensor.id}</Text>
+        {holding ? <Button title="Reset scale" small onPress={() => { sensor.hold = null; }} /> : null}
+        <Button title="Reset stats" small onPress={() => sensor.resetStats()} />
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 14, rowGap: 2, paddingHorizontal: 12, paddingBottom: 6 }}>
         <Stat label="Battery" value={sensor.battery ? `${sensor.battery.toFixed(2)} V` : "–"} tone={sensor.battery !== null && sensor.battery < 2.5 ? "bad" : undefined} />

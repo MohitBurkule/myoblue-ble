@@ -48,6 +48,11 @@ export class LiveSensor {
     return getSettings().calibrations[this.name] ?? null;
   }
 
+  /** zero the lost-packet and rate counters (the signal buffers are kept) */
+  resetStats() {
+    this.packets = 0; this.lost = 0; this.rate = 0; this.rateCount = 0; this.rateT = 0; this.hold = null;
+  }
+
   get lossPct(): number {
     return this.packets ? (100 * this.lost) / (this.lost + this.packets) : 0;
   }
