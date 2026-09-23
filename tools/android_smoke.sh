@@ -18,6 +18,11 @@ dump() {
   echo "(ui dump failed)"
 }
 has() { dump; python3 "$HERE/ui_find.py" "$OUT/ui.xml" "$1" >/dev/null; }
+# While recording, the notification chronometer keeps the system UI busy and uiautomator
+# can't get an idle state, so the recording screen's bar is tapped by position
+# (CI emulator: 320x640 px). Positions come from a screenshot of that screen.
+declare -A FIXED=( ["＋ Mark"]="52 558" ["rest"]="119 558" ["contract"]="187 558" ["Stop"]="271 558" )
+tap_fixed() { adb shell input tap ${FIXED[$1]}; echo "tap '$1' at ${FIXED[$1]} (fixed)"; }
 tap() {
   for i in 1 2 3 4 5; do
     dump
@@ -46,8 +51,9 @@ tap "● Record"; sleep 3; shot 04-new-recording
 tap "● Start recording"; sleep 6; alive; shot 05-recording
 adb shell dumpsys activity services $PKG | grep -q "RecordingService" || fail "foreground service not running"
 echo "foreground service running"
-tap "rest"; sleep 2
-tap "contract"; sleep 3
+tap_fixed "rest"; sleep 2
+tap_fixed "contract"; sleep 3
+shot 05b-markers
 
 # app in the background: the service must keep the process and recording alive
 adb shell input keyevent KEYCODE_HOME; sleep 15; alive
@@ -55,7 +61,7 @@ adb shell dumpsys activity services $PKG | grep -q "isForeground=true" || fail "
 echo "still recording in background"
 adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null; sleep 4
 
-tap "Stop"; sleep 8; alive; shot 06-session
+tap_fixed "Stop"; sleep 10; alive; shot 06-session
 has "By marker" || fail "session stats not shown"
 tap "Share CSV"; sleep 6; shot 07-share
 adb shell input keyevent KEYCODE_BACK; sleep 2

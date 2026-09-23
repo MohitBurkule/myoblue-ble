@@ -27,15 +27,15 @@ export function SensorCard({ sensor, settings }: { sensor: LiveSensor; settings:
   const active = cal && sensor.envNow > cal.threshold && !stalled && (sensor.state === "live" || sensor.state === "demo");
   return (
     <Card>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingTop: 10 }}>
         <View style={{ width: 12, height: 12, borderRadius: 4, backgroundColor: color }} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: t.ink, fontWeight: "700", fontSize: 15 }} numberOfLines={1}>{sensor.name.replace(/_/g, " ")}</Text>
-          <Text style={{ color: t.muted, fontSize: 12 }}>{sensor.source === "demo" ? "Simulated signal" : sensor.id}</Text>
-        </View>
+        <Text style={{ color: t.ink, fontWeight: "700", fontSize: 15, flex: 1 }} numberOfLines={1}>{sensor.name.replace(/_/g, " ")}</Text>
+        <Button title="Remove" small onPress={() => removeSensor(sensor.id)} />
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingTop: 2, paddingBottom: 4 }}>
         <Pill text={label} tone={tone} />
         {active ? <Pill text="Active" color={color} /> : null}
-        <Button title="Remove" small onPress={() => removeSensor(sensor.id)} />
+        <Text style={{ color: t.muted, fontSize: 12, flex: 1 }} numberOfLines={1}>{sensor.source === "demo" ? "Simulated signal" : sensor.id}</Text>
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 14, rowGap: 2, paddingHorizontal: 12, paddingBottom: 6 }}>
         <Stat label="Battery" value={sensor.battery ? `${sensor.battery.toFixed(2)} V` : "–"} tone={sensor.battery !== null && sensor.battery < 2.5 ? "bad" : undefined} />
