@@ -62,8 +62,12 @@ echo "still recording in background"
 adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null; sleep 4
 
 tap_fixed "Stop"; sleep 10; alive; shot 06-session
-has "By marker" || fail "session stats not shown"
-tap "Share CSV"; sleep 6; shot 07-share
+scroll() { adb shell input swipe 160 520 160 160 400; sleep 1; }
+found=0; for i in 1 2 3 4 5 6; do if has "By marker"; then found=1; break; fi; scroll; done
+[ $found = 1 ] || fail "session stats not shown"
+shot 06b-stats
+for i in 1 2 3; do has "Share CSV" && break; scroll; done
+tap "Share CSV"; sleep 8; shot 07-share
 adb shell input keyevent KEYCODE_BACK; sleep 2
 
 adb shell input keyevent KEYCODE_BACK; sleep 2

@@ -223,7 +223,7 @@ export function StaticPlot({ columns, overlay, height, color, ymin, ymax, marker
         {markers?.map((m, i) => (
           <React.Fragment key={i}>
             <Line x1={m.x * W} x2={m.x * W} y1={top} y2={bottom} stroke={t.warn} strokeWidth={1.2} />
-            <SvgText x={m.x * W + 3} y={top + 10} fill={t.warn} fontSize={10}>{m.label}</SvgText>
+            <SvgText x={m.x * W + 3} y={top + 10 + (i % 3) * 11} fill={t.warn} fontSize={10}>{m.label}</SvgText>
           </React.Fragment>
         ))}
         {xLabels?.map((l, i) => (
