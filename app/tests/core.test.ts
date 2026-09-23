@@ -122,8 +122,9 @@ test("spectrum shows ECG/hum peaks with wide band", () => {
   assert.equal(mag.length, FFT_N / 2);
   const bin50 = Math.round((50 * FFT_N) / DEMO_RATE);
   const around = Math.max(...Array.from(mag.slice(bin50 - 2, bin50 + 3)));
-  const far = mag[Math.round((300 * FFT_N) / DEMO_RATE)];
-  assert.ok(around > far * 5, "50 Hz hum visible without notch");
+  const band = Array.from(mag.slice(Math.round((150 * FFT_N) / DEMO_RATE), Math.round((450 * FFT_N) / DEMO_RATE))).sort((a, b) => a - b);
+  const median = band[band.length >> 1];
+  assert.ok(around > median * 5, `50 Hz hum visible without notch (${around.toFixed(0)} vs median ${median.toFixed(0)})`);
 });
 
 assert.equal(PACKET_BYTES, 244);
