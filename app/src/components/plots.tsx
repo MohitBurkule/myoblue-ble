@@ -12,13 +12,26 @@ let reduceMotion = false;
 AccessibilityInfo.isReduceMotionEnabled().then((v) => { reduceMotion = v; }).catch(() => {});
 AccessibilityInfo.addEventListener("reduceMotionChanged", (v) => { reduceMotion = v; });
 
-/** Re-render every `ms` (at most once a second when the system asks for reduced motion). */
+/** One shared timer per interval, so components refresh together (and the UI has idle gaps). */
+const clocks = new Map<number, { timer: ReturnType<typeof setInterval>; subs: Set<() => void> }>();
+function subscribeClock(ms: number, fn: () => void) {
+  let c = clocks.get(ms);
+  if (!c) {
+    const subs = new Set<() => void>();
+    c = { subs, timer: setInterval(() => subs.forEach((f) => f()), ms) };
+    clocks.set(ms, c);
+  }
+  c.subs.add(fn);
+  return () => {
+    c!.subs.delete(fn);
+    if (!c!.subs.size) { clearInterval(c!.timer); clocks.delete(ms); }
+  };
+}
+
+/** Re-render every `ms`; with reduced motion, everything refreshes together once a second. */
 export function useTick(ms: number) {
   const [n, setN] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setN((x) => x + 1), reduceMotion ? Math.max(ms, 1000) : ms);
-    return () => clearInterval(id);
-  }, [ms]);
+  useEffect(() => subscribeClock(reduceMotion ? 1000 : ms, () => setN((x) => x + 1)), [ms]);
   return n;
 }
 
