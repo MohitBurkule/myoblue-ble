@@ -25,14 +25,6 @@ class RecordingService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var title = "Recording"
 
-  private val tick = object : Runnable {
-    override fun run() {
-      if (!MyoBle.Recorder.active) return
-      notifyNow()
-      handler.postDelayed(this, 1000)
-    }
-  }
-
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -53,14 +45,11 @@ class RecordingService : Service() {
         acquire(12 * 60 * 60 * 1000L) // safety cap: 12 h
       }
     }
-    handler.removeCallbacks(tick)
-    handler.post(tick)
     instance = this
     return START_NOT_STICKY
   }
 
   override fun onDestroy() {
-    handler.removeCallbacks(tick)
     wakeLock?.let { if (it.isHeld) it.release() }
     wakeLock = null
     if (instance === this) instance = null
@@ -93,12 +82,11 @@ class RecordingService : Service() {
   @Suppress("DEPRECATION")
   private fun build(): Notification {
     val status = MyoBle.Recorder.status()
-    val elapsed = ((status?.get("elapsedMs") as? Double) ?: 0.0) / 1000
-    val h = (elapsed / 3600).toInt(); val m = ((elapsed / 60) % 60).toInt(); val s = (elapsed % 60).toInt()
-    val clock = if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    val started = ((status?.get("startedAt") as? Double) ?: System.currentTimeMillis().toDouble()).toLong()
     val live = MyoBle.liveCount()
     val markers = (status?.get("markers") as? Int) ?: 0
-    val text = "$clock · $live sensor${if (live == 1) "" else "s"} live · $markers marker${if (markers == 1) "" else "s"}"
+    // elapsed time is drawn by the system chronometer; the text only changes on events
+    val text = "$live sensor${if (live == 1) "" else "s"} live · $markers marker${if (markers == 1) "" else "s"}"
     val open = packageManager.getLaunchIntentForPackage(packageName)?.let {
       PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
@@ -108,7 +96,9 @@ class RecordingService : Service() {
       .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
-      .setShowWhen(false)
+      .setWhen(started)
+      .setUsesChronometer(true)
+      .setShowWhen(true)
       .setCategory(Notification.CATEGORY_SERVICE)
       .addAction(Notification.Action.Builder(null, "Mark", pending(ACTION_MARK, 1)).build())
       .addAction(Notification.Action.Builder(null, "Stop", pending(ACTION_STOP, 2)).build())
