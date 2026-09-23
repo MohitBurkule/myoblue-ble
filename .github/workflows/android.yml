@@ -2,7 +2,7 @@ name: Build Android app
 on:
   push:
     branches: [main]
-    paths: ["app/**", ".github/workflows/android.yml"]
+    paths: ["app/**", "tools/android_smoke.sh", "tools/ui_find.py", ".github/workflows/android.yml"]
   workflow_dispatch:
 permissions:
   contents: write
@@ -37,7 +37,8 @@ jobs:
         run: npx expo prebuild --platform android --no-install
       - name: Build release APK
         working-directory: app/android
-        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+        # x86_64 is included so the same APK runs on the CI emulator
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a,x86_64
       - name: Sign
         env:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -45,22 +46,56 @@ jobs:
         run: |
           echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          APK=android/app/build/outputs/apk/release/app-release.apk
           "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.p12" --ks-type PKCS12 --ks-pass env:KS_PASS \
-            --ks-key-alias myoblue --out "$RUNNER_TEMP/myoblue.apk" "$APK"
-          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/myoblue.apk" | head -3
-          cp "$RUNNER_TEMP/myoblue.apk" "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk"
+            --ks-key-alias myoblue --out "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk" \
+            android/app/build/outputs/apk/release/app-release.apk
+          "$BT/apksigner" verify --print-certs "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk" | head -2
           rm "$RUNNER_TEMP/release.p12"
       - uses: actions/upload-artifact@v4
         with:
           name: myoblue-apk
           path: myoblue-${{ github.run_number }}.apk
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: myoblue-apk
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Emulator smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash tools/android_smoke.sh myoblue-${{ github.run_number }}.apk smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-screenshots
+          path: smoke/
+
+  release:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: myoblue-apk
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=android-build-${{ github.run_number }}
-          gh release create "$TAG" "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk" \
+          gh release create "android-build-${{ github.run_number }}" "myoblue-${{ github.run_number }}.apk" \
+            -R "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "MYOblue Android build ${{ github.run_number }}" \
-            --notes "Install on Android: download the APK on the phone and open it (allow installing from this source when asked). Built from ${{ github.sha }}." \
+            --notes "Install on Android: download the APK on the phone and open it (allow installing from this source when asked). Passed the emulator smoke test (demo sensor: calibrate, record in background, markers, analysis, export). Built from ${{ github.sha }}." \
             --latest
