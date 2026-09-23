@@ -1,0 +1,66 @@
+name: Build Android app
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install
+        run: npm ci --legacy-peer-deps
+      - name: Typecheck and unit tests
+        run: npx tsc --noEmit && npm test
+      - name: Generate native project
+        run: npx expo prebuild --platform android --no-install
+      - name: Build release APK
+        working-directory: app/android
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - name: Sign
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.p12" --ks-type PKCS12 --ks-pass env:KS_PASS \
+            --ks-key-alias myoblue --out "$RUNNER_TEMP/myoblue.apk" "$APK"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/myoblue.apk" | head -3
+          cp "$RUNNER_TEMP/myoblue.apk" "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk"
+          rm "$RUNNER_TEMP/release.p12"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: myoblue-apk
+          path: myoblue-${{ github.run_number }}.apk
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=android-build-${{ github.run_number }}
+          gh release create "$TAG" "$GITHUB_WORKSPACE/myoblue-${{ github.run_number }}.apk" \
+            --title "MYOblue Android build ${{ github.run_number }}" \
+            --notes "Install on Android: download the APK on the phone and open it (allow installing from this source when asked). Built from ${{ github.sha }}." \
+            --latest
