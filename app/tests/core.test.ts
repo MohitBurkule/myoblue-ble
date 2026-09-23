@@ -114,6 +114,7 @@ test("segment stats with calibration", () => {
 
 test("spectrum shows ECG/hum peaks with wide band", () => {
   const d = new DemoSensor(1);
+  d.hint = "rest"; // no random EMG bursts: this test is about the mains hum
   const chain = new Chain({ band: "wide", notch: 0 });
   const ring = new Float32Array(4096);
   let w = 0;
