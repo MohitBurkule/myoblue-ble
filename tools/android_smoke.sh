@@ -8,7 +8,15 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"
 fail() { echo "FAIL: $*"; adb exec-out screencap -p > "$OUT/failure.png"; adb logcat -d > "$OUT/logcat.txt"; exit 1; }
 shot() { adb exec-out screencap -p > "$OUT/$1.png"; echo "screenshot $1"; }
-dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1; }
+# uiautomator needs a moment of UI idle; never reuse a stale dump
+dump() {
+  rm -f "$OUT/ui.xml"; adb shell rm -f /sdcard/ui.xml
+  for i in 1 2 3 4 5 6; do
+    adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 && adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "(ui dump failed)"
+}
 has() { dump; python3 "$HERE/ui_find.py" "$OUT/ui.xml" "$1" >/dev/null; }
 tap() {
   for i in 1 2 3 4 5; do

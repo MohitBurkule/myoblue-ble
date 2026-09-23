@@ -1,6 +1,6 @@
 /** Signal plots drawn with react-native-svg from min/max columns (fast enough at ~12 fps). */
 import React, { useEffect, useState } from "react";
-import { Text, View, type LayoutChangeEvent } from "react-native";
+import { AccessibilityInfo, Text, View, type LayoutChangeEvent } from "react-native";
 import Svg, { Line, Path, Rect, Text as SvgText } from "react-native-svg";
 import { spectrum as fft, FFT_N } from "../core/dsp";
 import type { LiveSensor } from "../lib/sensors";
@@ -8,10 +8,15 @@ import { RING } from "../lib/sensors";
 import type { Settings } from "../lib/settings";
 import { useTheme, uvLabel } from "../lib/theme";
 
+let reduceMotion = false;
+AccessibilityInfo.isReduceMotionEnabled().then((v) => { reduceMotion = v; }).catch(() => {});
+AccessibilityInfo.addEventListener("reduceMotionChanged", (v) => { reduceMotion = v; });
+
+/** Re-render every `ms` (at most once a second when the system asks for reduced motion). */
 export function useTick(ms: number) {
   const [n, setN] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setN((x) => x + 1), ms);
+    const id = setInterval(() => setN((x) => x + 1), reduceMotion ? Math.max(ms, 1000) : ms);
     return () => clearInterval(id);
   }, [ms]);
   return n;
