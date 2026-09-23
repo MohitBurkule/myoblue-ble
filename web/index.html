@@ -19,8 +19,9 @@
     <span>MYOblue Recorder</span>
   </div>
   <div id="recBadge" class="rec-badge" hidden><span class="rec-dot"></span><span id="recTime">00:00</span></div>
-  <button id="settingsBtn" class="icon-btn" aria-label="Display settings" title="Display settings">
+  <button id="settingsBtn" class="icon-btn labeled" aria-label="Display settings" title="Display settings">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+    <span>Display</span>
   </button>
 </header>
 
@@ -29,23 +30,38 @@
 <section id="settings" class="settings" hidden>
   <label>View
     <select id="viewMode">
-      <option value="filtered">Filtered EMG</option>
-      <option value="raw">Raw EMG</option>
+      <option value="filtered">Filtered signal</option>
+      <option value="raw">Raw signal</option>
       <option value="envelope">Envelope (RMS)</option>
     </select>
   </label>
   <label>Mains notch
     <select id="notch"><option value="0">Off</option><option value="50">50 Hz</option><option value="60">60 Hz</option></select>
   </label>
-  <label>High-pass
-    <select id="hp"><option value="0">Off</option><option value="10">10 Hz</option><option value="20">20 Hz</option></select>
+  <label>Signal
+    <select id="band">
+      <option value="emg">EMG · 20 Hz high-pass</option>
+      <option value="wide">Wide · 2–480 Hz (as MYOblue GUI)</option>
+      <option value="ecg">ECG · 0.5–40 Hz</option>
+    </select>
   </label>
   <label>Time window
     <select id="win"><option value="2">2 s</option><option value="5">5 s</option><option value="10">10 s</option></select>
   </label>
-  <label>Scale
-    <select id="scale"><option value="0">Auto</option><option value="100">±100 µV</option><option value="250">±250 µV</option><option value="500">±500 µV</option><option value="1000">±1 mV</option><option value="2500">±2.5 mV</option></select>
+  <label>Y axis
+    <select id="scale">
+      <option value="auto">Auto</option>
+      <option value="hold">Peak hold (only grows)</option>
+      <option value="mvc">Fit to calibrated max</option>
+      <option value="100">Fixed ±100 µV</option>
+      <option value="250">Fixed ±250 µV</option>
+      <option value="500">Fixed ±500 µV</option>
+      <option value="1000">Fixed ±1 mV</option>
+      <option value="2500">Fixed ±2.5 mV</option>
+    </select>
   </label>
+  <label class="check"><input type="checkbox" id="overlay"> Envelope over signal</label>
+  <label class="check"><input type="checkbox" id="spectrum"> Spectrum (FFT)</label>
   <label class="wide">Marker labels <input id="markerLabels" type="text" placeholder="rest, contract, trial" autocomplete="off"></label>
 </section>
 

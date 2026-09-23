@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION when any file changes.
-const VERSION = "myoblue-v1";
+const VERSION = "myoblue-v1.1";
 const FILES = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {

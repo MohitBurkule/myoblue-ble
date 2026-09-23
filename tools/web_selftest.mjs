@@ -89,10 +89,21 @@ try {
     const t = lines.slice(1).map(l => +l.split(',')[0]);
     let nonMonotonic = 0; for (let i = 1; i < t.length; i++) if (!(t[i] > t[i - 1])) nonMonotonic++;
     const withRaw = lines.slice(1).filter(l => l.split(',')[1] !== '').length;
-    return { file: csv.name, header: lines[0], rows: lines.length - 1, rowsWithData: withRaw, first: lines[1], nonMonotonic,
+    const withFilt = lines.slice(1).filter(l => l.split(',')[2] !== '').length;
+    return { file: csv.name, header: lines[0], rows: lines.length - 1, rowsWithData: withRaw, rowsWithFiltered: withFilt, first: lines[1], nonMonotonic,
       markers: lines.filter(l => l.endsWith('"')).map(l => l.split(',')[0] + ' ' + l.split(',').pop()),
       metaMarkers: meta.markers.map(m => m.t.toFixed(2) + ' ' + m.label), duration: meta.durationSeconds,
-      sensors: meta.sensors.map(x => ({ col: x.column, packets: x.packets, msPerPacket: x.clockMsPerPacket, calibrated: !!x.calibration })) };`);
+      filters: meta.filters, sensors: meta.sensors.map(x => ({ col: x.column, packets: x.packets, rateHz: x.measuredSampleRateHz, calibrated: !!x.calibration })) };`);
+
+  await step("display modes", `
+    const set = (id, v) => { const e = document.querySelector('#' + id); if (e.type === 'checkbox') e.checked = v; else e.value = v; e.dispatchEvent(new Event('change')); };
+    set('band', 'ecg'); set('spectrum', true); set('scale', 'hold'); await wait(1500);
+    const s = [...sensors.values()][0];
+    const holdA = s.hold && [Math.round(s.hold.ymin), Math.round(s.hold.ymax)];
+    set('scale', 'mvc'); set('viewMode', 'envelope'); await wait(600);
+    set('band', 'wide'); set('viewMode', 'filtered'); set('scale', 'auto'); await wait(600);
+    return { hold: holdA, spectrumShown: !s.ui.spec.hidden, specBins: s.spec?.length, settingsPanelOpen: !document.querySelector('#settings').hidden,
+      saved: JSON.parse(localStorage.getItem('myoblue.settings')) };`);
 
   await step("envelope view + delete", `
     document.querySelector('#viewMode').value = 'envelope'; document.querySelector('#viewMode').dispatchEvent(new Event('change'));

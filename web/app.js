@@ -18,6 +18,7 @@ const BATTERY_V_PER_LSB = 0.6 * 6 * 2 / 16384;  // same as MYOblue_GUI
 const RING = FS * 10;
 const ENV_WINDOW = 100;                          // ms, moving RMS for envelope
 const REC_ROW_BYTES = 8 + PACKET_BYTES;          // float64 host time + raw packet
+const DEMO_RATE = 976;                           // real sensors run ~2-3% below 1 kHz
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, props = {}, ...kids) => {
@@ -38,9 +39,12 @@ const store = {
 };
 
 const settings = Object.assign(
-  { viewMode: "filtered", notch: 50, hp: 20, win: 5, scale: 0, markerLabels: "rest, contract, trial" },
+  { viewMode: "filtered", band: "emg", notch: 50, win: 5, scale: "auto", overlay: true, spectrum: false,
+    markerLabels: "rest, contract, trial" },
   store.get("settings", {}),
 );
+if (typeof settings.scale === "number") settings.scale = settings.scale ? String(settings.scale) : "auto"; // v1.0
+if ("hp" in settings) { if (!store.get("settings", {}).band) settings.band = settings.hp === 0 ? "wide" : "emg"; delete settings.hp; }
 function saveSettings() { store.set("settings", settings); }
 
 /* ---------------- DSP ---------------- */
@@ -50,6 +54,7 @@ function biquad(type, f0, q) {
   const a0 = 1 + alpha;
   let b0, b1, b2;
   if (type === "hp") { b0 = (1 + c) / 2; b1 = -(1 + c); b2 = (1 + c) / 2; }
+  else if (type === "lp") { b0 = (1 - c) / 2; b1 = 1 - c; b2 = (1 - c) / 2; }
   else { b0 = 1; b1 = -2 * c; b2 = 1; }  // notch
   const k = [b0 / a0, b1 / a0, b2 / a0, (-2 * c) / a0, (1 - alpha) / a0];
   let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
@@ -62,12 +67,22 @@ function biquad(type, f0, q) {
   return f;
 }
 
-/** High-pass + notch + moving-RMS envelope, one sample at a time. */
+/** Signal presets. "wide" matches MYOblue_GUI's default band-pass (2-480 Hz). */
+const BANDS = {
+  emg: { label: "EMG (20 Hz high-pass)", hp: 20, order: 4 },
+  wide: { label: "Wide 2-480 Hz (like MYOblue GUI; shows ECG)", hp: 2, order: 2, lp: 480 },
+  ecg: { label: "ECG / heart (0.5-40 Hz)", hp: 0.5, order: 2, lp: 40 },
+};
+const BUTTERWORTH_Q = { 2: [0.7071], 4: [0.5412, 1.3066] };
+
+/** Band filter + notch + moving-RMS envelope, one sample at a time. */
 class Chain {
-  constructor({ hp, notch }) {
+  constructor({ band, notch }) {
+    const b = BANDS[band] || BANDS.emg;
     this.stages = [];
-    if (hp) this.stages.push(biquad("hp", hp, 0.5412), biquad("hp", hp, 1.3066)); // 4th-order Butterworth
-    if (notch) for (const h of [1, 2, 3]) this.stages.push(biquad("notch", notch * h, 8));
+    for (const q of BUTTERWORTH_Q[b.order]) this.stages.push(biquad("hp", b.hp, q));
+    if (b.lp) for (const q of BUTTERWORTH_Q[4]) this.stages.push(biquad("lp", b.lp, q));
+    if (notch) for (const h of [1, 2, 3]) if (!b.lp || notch * h < b.lp) this.stages.push(biquad("notch", notch * h, 8));
     this.win = new Float64Array(ENV_WINDOW);
     this.wi = 0; this.acc = 0;
     this.settle = 0;
@@ -180,12 +195,13 @@ class Sensor {
 
 function setState(s, state, detail = "") {
   s.state = state;
-  const labels = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", stalled: "No data", failed: "Disconnected", demo: "Demo" };
-  const cls = { live: "live", demo: "live", connecting: "warn", reconnecting: "warn", stalled: "warn", failed: "bad" };
+  const labels = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", stalled: "No data", failed: "Disconnected",
+    demo: "Demo", searching: "Waiting for sensor — switch it on" };
+  const cls = { live: "live", demo: "live", connecting: "warn", reconnecting: "warn", stalled: "warn", failed: "bad", searching: "warn" };
   s.ui.state.textContent = (s.source === "demo" && state === "live") ? "Demo" : (labels[state] || state);
   s.ui.state.className = "pill " + (cls[state] || "");
   s.ui.state.title = detail;
-  s.ui.reconnect.hidden = state !== "failed" || s.source !== "ble";
+  s.ui.reconnect.hidden = !(state === "failed" || state === "searching") || s.source !== "ble";
   updateActions();
 }
 
@@ -204,7 +220,11 @@ async function addBleSensor() {
     return;
   }
   const existing = sensors.get(device.id);
-  if (existing) { if (existing.state === "failed") connectBle(existing); return; }
+  if (existing) { if (existing.state === "failed" || existing.state === "searching") connectBle(existing); return; }
+  attachBleDevice(device).then(connectBle);
+}
+
+async function attachBleDevice(device) {
   const s = new Sensor({ key: device.id, name: device.name || "MYOblue", source: "ble", device });
   sensors.set(s.key, s);
   device.addEventListener("gattserverdisconnected", () => {
@@ -214,7 +234,39 @@ async function addBleSensor() {
   });
   recorder.sensorJoined(s);
   updateLayout();
-  connectBle(s);
+  return s;
+}
+
+/**
+ * Reconnect sensors this site was allowed to use before a reload.
+ * Needs navigator.bluetooth.getDevices() (Chrome's persistent Bluetooth permissions).
+ */
+async function restoreBleSensors() {
+  if (!navigator.bluetooth) return;
+  if (!navigator.bluetooth.getDevices) {
+    if (store.get("usedBle", false)) showBanner("This browser doesn't let web pages remember Bluetooth devices, so tap Add sensor again after a reload. "
+      + "In Chrome you can turn it on at chrome://flags/#enable-web-bluetooth-new-permissions-backend (copy it into the address bar).");
+    return;
+  }
+  let devices = [];
+  try { devices = await navigator.bluetooth.getDevices(); } catch { return; }
+  for (const device of devices) {
+    if (!/MYOblue/i.test(device.name || "") || sensors.has(device.id)) continue;
+    const s = await attachBleDevice(device);
+    if (device.watchAdvertisements) {
+      // connect as soon as the sensor is heard, so a sensor switched on later still connects
+      setState(s, "searching");
+      s.watch = new AbortController();
+      device.addEventListener("advertisementreceived", () => {
+        if (s.state !== "searching") return;
+        s.watch.abort();
+        connectBle(s);
+      });
+      device.watchAdvertisements({ signal: s.watch.signal }).catch(() => connectBle(s));
+    } else {
+      connectBle(s);
+    }
+  }
 }
 
 async function connectBle(s) {
@@ -234,6 +286,7 @@ async function connectBle(s) {
       await tx.startNotifications();
       s.connecting = false;
       s.lastPacketAt = performance.now();
+      store.set("usedBle", true);
       keepAwake();
       return;
     } catch (e) {
@@ -247,7 +300,9 @@ async function connectBle(s) {
 
 function removeSensor(s) {
   s.closed = true;
+  s.watch?.abort();
   if (s.source === "ble" && s.device?.gatt.connected) s.device.gatt.disconnect();
+  if (s.source === "ble") s.device?.forget?.().catch(() => {});  // don't auto-reconnect after reload
   if (s.demoTimer) clearInterval(s.demoTimer);
   s.ui.card.remove();
   sensors.delete(s.key);
@@ -273,7 +328,7 @@ function addDemoSensor() {
     dv.setUint8(0, n);
     dv.setUint8(1, seq & 255); dv.setUint8(2, (seq >> 8) & 255); dv.setUint8(3, (seq >> 16) & 255);
     dv.setUint16(4, Math.round((3.0 - seq * 1e-6) / BATTERY_V_PER_LSB), true);
-    const batteryPacket = seq > 0 && seq % 504 === 0; // ~once a minute, like the real sensor
+    const batteryPacket = seq > 0 && seq % 492 === 0; // ~once a minute, like the real sensor
     for (let i = 0; i < PER_PACKET; i++, t++) {
       if (cal.hint === "rest") { burstUntil = 0; nextBurst = t + 800; }
       else if (cal.hint === "mvc") { burstAmp = 300; burstUntil = t + 200; nextBurst = t + 1e9; }
@@ -283,7 +338,9 @@ function addDemoSensor() {
       const g = (Math.random() + Math.random() + Math.random() - 1.5) * 1.6;
       lp = 0.55 * lp + 0.45 * g;                                // band-limit the burst noise
       const emg = (g - lp) * burstAmp * ramp;
-      const uv = emg + g * 4 + 18 * Math.sin(2 * Math.PI * 50 * t / FS + phase) + 40 * Math.sin(2 * Math.PI * 0.3 * t / FS);
+      const beat = (t % 850) - 60;                                   // ~70 bpm ECG pickup
+      const ecg = 110 * Math.exp(-(beat * beat) / 60) - 25 * Math.exp(-((beat - 12) ** 2) / 40) + 22 * Math.exp(-((beat - 260) ** 2) / 2500);
+      const uv = emg + ecg + g * 4 + 18 * Math.sin(2 * Math.PI * 50 * t / DEMO_RATE + phase) + 40 * Math.sin(2 * Math.PI * 0.3 * t / DEMO_RATE);
       const raw = batteryPacket ? 8192 : Math.max(0, Math.min(16383, Math.round(8192 + uv / UV_PER_LSB)));
       dv.setUint16(6 + i * 2, raw, true);
     }
@@ -292,7 +349,7 @@ function addDemoSensor() {
   };
   // emit by elapsed time so throttled timers (background tabs) still give 1 kHz
   s.demoTimer = setInterval(() => {
-    const due = Math.floor((performance.now() - started) / PER_PACKET);
+    const due = Math.floor((performance.now() - started) / (PER_PACKET * 1000 / DEMO_RATE));
     for (let k = 0; seq < due && k < 100; k++) emit();
   }, PER_PACKET);
 }
@@ -357,6 +414,7 @@ const recorder = {
   pending: new Map(), // sensorKey -> array of Uint8Array rows
   flushTimer: null,
   bytes: 0,
+  sinceFlush: 0,
 
   get active() { return !!this.rec; },
 
@@ -370,7 +428,7 @@ const recorder = {
       id: now.toISOString() + "-" + Math.random().toString(36).slice(2, 7),
       name, notes, createdAt: now.toISOString(), status: "recording",
       durationMs: 0, sensors: [...sensors.values()].map((s) => this.sensorMeta(s)),
-      markers: [], packets: {}, filters: { hp: settings.hp, notch: settings.notch },
+      markers: [], packets: {}, filters: { band: settings.band, notch: settings.notch },
       app: { version: APP_VERSION, userAgent: navigator.userAgent },
     };
     this.t0 = performance.now();
@@ -399,6 +457,8 @@ const recorder = {
     list.push(row);
     this.rec.packets[s.key] = (this.rec.packets[s.key] || 0) + 1;
     this.bytes += PACKET_BYTES;
+    // timers are throttled when the page is in the background; data events are not
+    if (++this.sinceFlush >= 25 * Math.max(1, sensors.size)) { this.sinceFlush = 0; this.flush(); }
   },
 
   addMarker(label) {
@@ -444,8 +504,19 @@ function beforeUnload(e) { e.preventDefault(); e.returnValue = ""; }
 
 /* ---------------- export ---------------- */
 
-/** Rebuild per-sensor sample series on a shared 1 kHz timeline. */
-async function assemble(rec) {
+/** Filters in old recordings were stored as { hp }; map them to a band preset. */
+function recFilters(rec) {
+  const f = rec.filters || {};
+  return { band: f.band || (f.hp === 0 ? "wide" : "emg"), notch: f.notch ?? 50 };
+}
+
+/**
+ * Rebuild each sensor's sample stream from stored packets, filter it in sensor order
+ * (resetting only at real gaps), then place it on a shared 1 ms timeline.
+ * The sensors' clocks run ~2-3% slow (≈975 Hz), so each sample's time comes from a
+ * fit of packet arrival time against sequence number, not from a nominal 1 kHz.
+ */
+async function assemble(rec, filters) {
   const chunks = await db.chunks(rec.id);
   const bySensor = new Map();
   for (const c of chunks) {
@@ -459,12 +530,13 @@ async function assemble(rec) {
     if (!parts) continue;
     const rows = [];
     for (const p of parts) {
-      const dv = new DataView(p.buffer);
       for (let off = 0; off + REC_ROW_BYTES <= p.byteLength; off += REC_ROW_BYTES) rows.push(new DataView(p.buffer, off, REC_ROW_BYTES));
     }
+    const n = rows.length;
+    if (!n) continue;
     // unwrap the 24-bit sequence counter
     let prev = null, wraps = 0;
-    const seqs = new Float64Array(rows.length), hosts = new Float64Array(rows.length);
+    const seqs = new Float64Array(n), hosts = new Float64Array(n);
     rows.forEach((r, i) => {
       const s = r.getUint8(9) | (r.getUint8(10) << 8) | (r.getUint8(11) << 16);
       if (prev !== null && s < prev && prev - s > 0x800000) wraps++;
@@ -472,124 +544,116 @@ async function assemble(rec) {
       seqs[i] = s + wraps * 0x1000000;
       hosts[i] = r.getFloat64(0, true);
     });
-    // sensor clock -> recording clock: least-squares fit of arrival time vs sequence,
-    // then shift to the lower envelope (packets arrive late, never early)
-    const n = rows.length;
-    let slope = PER_PACKET;
-    let mx = 0, my = 0;
-    for (let i = 0; i < n; i++) { mx += seqs[i]; my += hosts[i]; }
-    mx /= n; my /= n;
+    // sensor clock -> recording clock: least-squares slope of arrival time vs sequence,
+    // offset from the lower envelope (packets arrive late, never early)
+    let slope = PER_PACKET / 0.976;
     if (n > 50) {
+      let mx = 0, my = 0;
+      for (let i = 0; i < n; i++) { mx += seqs[i]; my += hosts[i]; }
+      mx /= n; my /= n;
       let sxy = 0, sxx = 0;
       for (let i = 0; i < n; i++) { sxy += (seqs[i] - mx) * (hosts[i] - my); sxx += (seqs[i] - mx) ** 2; }
-      const fit = sxx ? sxy / sxx : PER_PACKET;
-      if (fit > PER_PACKET * 0.98 && fit < PER_PACKET * 1.02) slope = fit;
+      const fit = sxx ? sxy / sxx : slope;
+      if (fit > PER_PACKET * 0.9 && fit < PER_PACKET * 1.1) slope = fit;
     }
     let offset = Infinity;
     for (let i = 0; i < n; i++) offset = Math.min(offset, hosts[i] - slope * seqs[i]);
-    series.push({ meta, rows, seqs, slope, offset });
-  }
-  let tMin = Infinity, tMax = -Infinity;
-  for (const s of series) {
-    for (let i = 0; i < s.rows.length; i++) {
-      const tEnd = s.offset + s.slope * s.seqs[i];
-      tMin = Math.min(tMin, tEnd - s.slope);
-      tMax = Math.max(tMax, tEnd);
-    }
-  }
-  if (!series.length) return { series: [], length: 0, tMin: 0 };
-  tMin = Math.max(0, Math.floor(tMin)); // drop samples captured before Record was pressed
-  const length = Math.ceil(tMax - tMin) + 1;
-  for (const s of series) {
-    const uv = new Float32Array(length).fill(NaN);
-    const step = s.slope / PER_PACKET;
-    for (let r = 0; r < s.rows.length; r++) {
-      const row = s.rows[r];
+
+    const total = n * PER_PACKET, step = slope / PER_PACKET;
+    const t = new Float64Array(total), uv = new Float32Array(total), filt = new Float32Array(total), env = new Float32Array(total);
+    const chain = new Chain(filters);
+    chain.reset();
+    let k = 0;
+    for (let r = 0; r < n; r++) {
+      const row = rows[r];
+      if (r > 0 && seqs[r] !== seqs[r - 1] + 1) chain.reset();  // lost packets
+      const tLast = offset + slope * seqs[r];
       let empty = true;
       for (let i = 0; i < PER_PACKET; i++) if (row.getUint16(14 + i * 2, true) !== 8192) { empty = false; break; }
-      if (empty) continue;
-      const tLast = s.offset + s.slope * s.seqs[r];
-      for (let i = 0; i < PER_PACKET; i++) {
-        const idx = Math.round(tLast - (PER_PACKET - 1 - i) * step - tMin);
-        if (idx >= 0 && idx < length) uv[idx] = (row.getUint16(14 + i * 2, true) - 8192) * UV_PER_LSB;
+      for (let i = 0; i < PER_PACKET; i++, k++) {
+        t[k] = tLast - (PER_PACKET - 1 - i) * step;
+        if (empty) { uv[k] = filt[k] = env[k] = NaN; continue; }  // battery-measurement packet
+        const x = (row.getUint16(14 + i * 2, true) - 8192) * UV_PER_LSB;
+        const [f, e] = chain.step(x);
+        uv[k] = x; filt[k] = f; env[k] = e;
       }
+      if (empty) chain.reset();
     }
-    s.uv = uv;
+    series.push({ meta, packets: n, slope, sampleRate: 1000 * PER_PACKET / slope, t, uv, filt, env });
+  }
+  if (!series.length) return { series, length: 0, tMin: 0 };
+  let tMin = Infinity, tMax = -Infinity;
+  for (const s of series) { tMin = Math.min(tMin, s.t[0]); tMax = Math.max(tMax, s.t[s.t.length - 1]); }
+  tMin = Math.max(0, Math.floor(tMin)); // drop samples captured before Record was pressed
+  const length = Math.max(0, Math.ceil(tMax - tMin) + 1);
+  for (const s of series) {
+    // grid cell -> sample index; a ~975 Hz stream leaves single empty cells, fill those
+    const gi = new Int32Array(length).fill(-1);
+    for (let k = 0; k < s.t.length; k++) {
+      const idx = Math.round(s.t[k] - tMin);
+      if (idx >= 0 && idx < length && gi[idx] < 0) gi[idx] = k;
+    }
+    for (let i = 1; i < length - 1; i++) if (gi[i] < 0 && gi[i - 1] >= 0 && gi[i + 1] >= 0 && gi[i + 1] - gi[i - 1] <= 1) gi[i] = gi[i - 1];
+    s.gi = gi;
   }
   return { series, length, tMin };
-}
-
-function processSeries(uv, filters) {
-  const n = uv.length, filt = new Float32Array(n).fill(NaN), env = new Float32Array(n).fill(NaN);
-  const chain = new Chain(filters);
-  chain.reset();
-  let wasGap = true;
-  for (let i = 0; i < n; i++) {
-    const x = uv[i];
-    if (x !== x) { if (!wasGap) chain.reset(); wasGap = true; continue; }
-    wasGap = false;
-    const [f, e] = chain.step(x);
-    filt[i] = f; env[i] = e;
-  }
-  return { filt, env };
 }
 
 const fmt = (v, d = 2) => (v === v ? v.toFixed(d) : "");
 
 async function buildExport(rec) {
-    const { series, length, tMin } = await assemble(rec);
-    const filters = rec.filters || { hp: 20, notch: 50 };
-    const cols = ["time_s"];
+  const filters = recFilters(rec);
+  const { series, length, tMin } = await assemble(rec, filters);
+  const cols = ["time_s"];
+  for (const s of series) {
+    s.mvc = s.meta.calibration?.mvcRms;
+    cols.push(`${s.meta.short}_raw_uV`, `${s.meta.short}_filtered_uV`, `${s.meta.short}_envelope_uV`);
+    if (s.mvc) cols.push(`${s.meta.short}_pct_mvc`);
+  }
+  cols.push("marker");
+  const markers = new Map();
+  for (const m of rec.markers) {
+    const idx = Math.max(0, Math.min(length - 1, Math.round(m.t * 1000 - tMin)));
+    markers.set(idx, markers.has(idx) ? markers.get(idx) + "; " + m.label : m.label);
+  }
+  const parts = [cols.join(",") + "\n"];
+  let lines = [];
+  for (let i = 0; i < length; i++) {
+    let line = ((tMin + i) / 1000).toFixed(3);
+    let any = false;
     for (const s of series) {
-      const p = processSeries(s.uv, filters);
-      s.filt = p.filt; s.env = p.env;
-      const mvc = s.meta.calibration?.mvcRms;
-      s.mvc = mvc;
-      cols.push(`${s.meta.short}_raw_uV`, `${s.meta.short}_filtered_uV`, `${s.meta.short}_envelope_uV`);
-      if (mvc) cols.push(`${s.meta.short}_pct_mvc`);
+      const k = s.gi[i];
+      const r = k >= 0 ? s.uv[k] : NaN, f = k >= 0 ? s.filt[k] : NaN, e = k >= 0 ? s.env[k] : NaN;
+      if (r === r) any = true;
+      line += "," + fmt(r) + "," + fmt(f) + "," + fmt(e);
+      if (s.mvc) line += "," + fmt(e / s.mvc * 100, 1);
     }
-    cols.push("marker");
-    const markers = new Map();
-    for (const m of rec.markers) {
-      const idx = Math.max(0, Math.min(length - 1, Math.round(m.t * 1000 - tMin)));
-      markers.set(idx, markers.has(idx) ? markers.get(idx) + "; " + m.label : m.label);
-    }
-    const parts = [cols.join(",") + "\n"];
-    let lines = [];
-    for (let i = 0; i < length; i++) {
-      let line = ((tMin + i) / 1000).toFixed(3);
-      let any = false;
-      for (const s of series) {
-        const r = s.uv[i];
-        if (r === r) any = true;
-        line += "," + fmt(r) + "," + fmt(s.filt[i]) + "," + fmt(s.env[i]);
-        if (s.mvc) line += "," + fmt(s.env[i] / s.mvc * 100, 1);
-      }
-      const mk = markers.get(i);
-      if (!any && !mk) continue;
-      line += "," + (mk ? `"${mk.replace(/"/g, '""')}"` : "");
-      lines.push(line);
-      if (lines.length >= 20000) { parts.push(lines.join("\n") + "\n"); lines = []; }
-    }
-    if (lines.length) parts.push(lines.join("\n") + "\n");
-    const base = fileBase(rec);
-    const csv = new File(parts, base + ".csv", { type: "text/csv" });
-    const meta = {
-      name: rec.name, notes: rec.notes, createdAt: rec.createdAt, status: rec.status,
-      durationSeconds: +(rec.durationMs / 1000).toFixed(3),
-      sampleRateHz: FS, units: "microvolts (MYOblue_GUI scale: (raw - 8192) * 0.30518)",
-      timeBase: "seconds since recording start; sensor clocks aligned by fitting packet arrival times",
-      filters: { highPassHz: filters.hp || null, notchHz: filters.notch || null, envelope: `moving RMS, ${ENV_WINDOW} ms` },
-      sensors: series.map((s) => ({
-        column: s.meta.short, name: s.meta.name, module: s.meta.module, source: s.meta.source,
-        packets: s.rows.length, clockMsPerPacket: +s.slope.toFixed(4),
-        calibration: s.meta.calibration || null,
-      })),
-      markers: rec.markers,
-      app: rec.app,
-    };
-    const json = new File([JSON.stringify(meta, null, 2)], base + ".json", { type: "application/json" });
-    return { csv, json };
+    const mk = markers.get(i);
+    if (!any && !mk) continue;
+    line += "," + (mk ? `"${mk.replace(/"/g, '""')}"` : "");
+    lines.push(line);
+    if (lines.length >= 20000) { parts.push(lines.join("\n") + "\n"); lines = []; }
+  }
+  if (lines.length) parts.push(lines.join("\n") + "\n");
+  const base = fileBase(rec);
+  const csv = new File(parts, base + ".csv", { type: "text/csv" });
+  const band = BANDS[filters.band];
+  const meta = {
+    name: rec.name, notes: rec.notes, createdAt: rec.createdAt, status: rec.status,
+    durationSeconds: +(rec.durationMs / 1000).toFixed(3),
+    gridHz: FS, units: "microvolts (MYOblue_GUI scale: (raw - 8192) * 0.30518)",
+    timeBase: "seconds since recording start, 1 ms rows; each sample is placed at its own time from the sensor's clock (fitted to packet arrival times)",
+    filters: { preset: filters.band, label: band.label, highPassHz: band.hp, lowPassHz: band.lp || null, notchHz: filters.notch || null, envelope: `moving RMS, ${ENV_WINDOW} samples` },
+    sensors: series.map((s) => ({
+      column: s.meta.short, name: s.meta.name, module: s.meta.module, source: s.meta.source,
+      packets: s.packets, measuredSampleRateHz: +s.sampleRate.toFixed(2),
+      calibration: s.meta.calibration || null,
+    })),
+    markers: rec.markers,
+    app: rec.app,
+  };
+  const json = new File([JSON.stringify(meta, null, 2)], base + ".json", { type: "application/json" });
+  return { csv, json };
 }
 
 async function exportRecording(id, { share = false } = {}) {
@@ -735,7 +799,7 @@ const cal = {
     const save = el("button", { className: "btn primary", textContent: "Save calibration", disabled: !results.length });
     save.onclick = () => {
       for (const [s, r] of results) {
-        s.cal = { ...r, date: new Date().toISOString(), filters: { hp: settings.hp, notch: settings.notch } };
+        s.cal = { ...r, date: new Date().toISOString(), filters: { band: settings.band, notch: settings.notch } };
         calibration.set(s.name, s.cal);
         updateCardCal(s);
       }
@@ -784,14 +848,17 @@ function buildCard(s) {
   const [batS, bat] = b("Battery"), [rateS, rate] = b("Rate"), [lossS, loss] = b("Lost"), [calS, calV] = b("Calibration");
   const stats = el("div", { className: "stats" }, batS, rateS, lossS, calS);
   const canvas = el("canvas");
-  const plot = el("div", { className: "plot" }, canvas);
+  const plot = el("div", { className: "plot", title: "Tap to reset the peak-hold scale" }, canvas);
+  plot.onclick = () => { s.hold = null; };
+  const specCanvas = el("canvas");
+  const spec = el("div", { className: "plot spectrum", hidden: !settings.spectrum }, specCanvas);
   const fill = el("div", { className: "meter-fill" });
   const thr = el("div", { className: "meter-thr", hidden: true });
   const meterVal = el("span", { className: "meter-val", textContent: "–" });
   const meter = el("div", { className: "meter" }, el("span", { textContent: "Effort" }), el("div", { className: "meter-track" }, fill, thr), meterVal);
-  card.append(head, stats, plot, meter);
+  card.append(head, stats, plot, spec, meter);
   $("#sensors").append(card);
-  const ui = { card, state, active, reconnect, bat, rate, loss, calV, canvas, fill, thr, meterVal };
+  const ui = { card, state, active, reconnect, bat, rate, loss, calV, canvas, spec, specCanvas, fill, thr, meterVal };
   s.ui = ui;
   updateCardCal(s);
   return ui;
@@ -807,27 +874,27 @@ function updateCardCal(s) {
 let cssVars = {};
 function readCssVars() {
   const cs = getComputedStyle(document.documentElement);
-  cssVars = { grid: cs.getPropertyValue("--grid").trim(), muted: cs.getPropertyValue("--muted").trim(), line: cs.getPropertyValue("--line").trim() };
+  cssVars = { grid: cs.getPropertyValue("--grid").trim(), muted: cs.getPropertyValue("--muted").trim(),
+    line: cs.getPropertyValue("--line").trim(), ink: cs.getPropertyValue("--ink").trim() };
   for (const s of sensors.values()) s.colorResolved = getComputedStyle(s.ui.card).getPropertyValue("--c").trim();
 }
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readCssVars);
 
-function drawSensor(s) {
-  const c = s.ui.canvas, dpr = Math.min(devicePixelRatio || 1, 2);
-  const W = c.clientWidth, H = c.clientHeight;
-  if (!W || !H) return;
+function prepCanvas(c) {
+  const dpr = Math.min(devicePixelRatio || 1, 2), W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return null;
   if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
   const g = c.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
-  const n = settings.win * FS;
-  const mode = settings.viewMode;
-  const buf = mode === "raw" ? s.raw : mode === "envelope" ? s.env : s.filt;
-  const start = (s.w - n + RING) % RING;
-  const cols = Math.max(1, Math.floor(W));
-  const per = n / cols;
-  let lo = Infinity, hi = -Infinity;
+  return { g, W, H };
+}
+
+/** Column-wise min/max of the newest n samples of a ring buffer. */
+function columns(buf, w, n, cols) {
+  const start = (w - n + RING) % RING, per = n / cols;
   const mins = new Float32Array(cols), maxs = new Float32Array(cols);
+  let lo = Infinity, hi = -Infinity;
   for (let x = 0; x < cols; x++) {
     let mn = Infinity, mx = -Infinity;
     const a = Math.floor(x * per), b = Math.floor((x + 1) * per);
@@ -835,28 +902,59 @@ function drawSensor(s) {
     mins[x] = mn; maxs[x] = mx;
     if (mn < lo) lo = mn; if (mx > hi) hi = mx;
   }
+  return { mins, maxs, lo, hi };
+}
+
+function yRange(s, mode, lo, hi) {
+  const envelope = mode === "envelope", sc = settings.scale;
   let ymin, ymax;
-  const envelope = mode === "envelope";
-  if (settings.scale) { ymax = +settings.scale; ymin = envelope ? 0 : -ymax; }
-  else if (lo === Infinity) { ymax = 50; ymin = envelope ? 0 : -50; }
+  if (sc === "mvc" && s.cal) {                  // fit to calibrated maximum: whole effort range visible
+    ymax = envelope ? s.cal.mvcRms * 1.25 : s.cal.mvcRms * 3.5;
+    ymin = envelope ? 0 : -ymax;
+  } else if (sc !== "auto" && sc !== "hold" && sc !== "mvc") {
+    ymax = +sc; ymin = envelope ? 0 : -ymax;
+  } else if (lo === Infinity) { ymax = 50; ymin = envelope ? 0 : -50; }
   else if (envelope) { ymin = 0; ymax = Math.max(hi * 1.15, 10); }
   else if (mode === "raw") { const pad = Math.max((hi - lo) * 0.1, 5); ymin = lo - pad; ymax = hi + pad; }
   else { const m = Math.max(Math.abs(lo), Math.abs(hi), 10) * 1.15; ymin = -m; ymax = m; }
+  if (sc === "hold" || (sc === "mvc" && !s.cal)) {  // peak hold: only ever grows, tap the plot to reset
+    const key = mode;
+    if (!s.hold || s.hold.key !== key) s.hold = { key, ymin, ymax };
+    s.hold.ymin = Math.min(s.hold.ymin, ymin); s.hold.ymax = Math.max(s.hold.ymax, ymax);
+    ymin = s.hold.ymin; ymax = s.hold.ymax;
+  }
+  return [ymin, ymax];
+}
+
+function drawSensor(s) {
+  const p = prepCanvas(s.ui.canvas);
+  if (!p) return;
+  const { g, W, H } = p;
+  const rate = s.rate > 500 ? s.rate : FS;
+  const n = Math.min(RING, Math.round(settings.win * rate));
+  const mode = settings.viewMode;
+  const buf = mode === "raw" ? s.raw : mode === "envelope" ? s.env : s.filt;
+  const cols = Math.max(1, Math.floor(W));
+  const { mins, maxs, lo, hi } = columns(buf, s.w, n, cols);
+  const envelope = mode === "envelope";
+  const overlay = settings.overlay && mode === "filtered" ? columns(s.env, s.w, n, cols) : null;
+  const [ymin, ymax] = yRange(s, mode, lo, overlay ? Math.max(hi, overlay.hi) : hi);
   const top = 6, bottom = H - 6;
-  const Y = (v) => bottom - (v - ymin) / (ymax - ymin) * (bottom - top);
+  const Y = (v) => bottom - (Math.max(ymin, Math.min(ymax, v)) - ymin) / (ymax - ymin) * (bottom - top);
 
   // grid: zero line, 1 s ticks
   g.strokeStyle = cssVars.grid; g.lineWidth = 1; g.beginPath();
   for (let sec = 1; sec < settings.win; sec++) { const x = Math.round(W * sec / settings.win) + 0.5; g.moveTo(x, top); g.lineTo(x, bottom); }
   if (ymin < 0 && ymax > 0) { const y = Math.round(Y(0)) + 0.5; g.moveTo(0, y); g.lineTo(W, y); }
   g.stroke();
-  // calibration threshold in envelope view
-  if (envelope && s.cal) {
+  if (envelope && s.cal) {  // activity threshold
     const y = Y(s.cal.threshold);
     g.strokeStyle = cssVars.muted; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.setLineDash([]);
   }
-  // trace
-  g.strokeStyle = s.colorResolved || "#2458d6"; g.lineWidth = 1.3; g.lineJoin = "round"; g.beginPath();
+  // signal
+  g.strokeStyle = s.colorResolved || "#2458d6"; g.lineWidth = 1.3; g.lineJoin = "round";
+  g.globalAlpha = overlay ? 0.75 : 1;
+  g.beginPath();
   let pen = false;
   for (let x = 0; x < cols; x++) {
     if (mins[x] === Infinity) { pen = false; continue; }
@@ -865,11 +963,102 @@ function drawSensor(s) {
     if (y2 !== y1) g.lineTo(x, y2);
   }
   g.stroke();
+  g.globalAlpha = 1;
+  // envelope overlay (±RMS), like the envelope/RMS lines in MYOblue_GUI
+  if (overlay) {
+    g.strokeStyle = cssVars.ink; g.lineWidth = 1.6;
+    for (const sign of [1, -1]) {
+      g.beginPath(); pen = false;
+      for (let x = 0; x < cols; x++) {
+        const v = overlay.maxs[x];
+        if (v === -Infinity) { pen = false; continue; }
+        const y = Y(sign * v);
+        if (!pen) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+  }
   // labels
   g.fillStyle = cssVars.muted; g.font = "11px ui-sans-serif, system-ui, sans-serif";
   const unit = (v) => Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)} mV` : `${Math.round(v)} µV`;
   g.fillText(unit(ymax), 8, 16);
   if (!envelope) g.fillText(unit(ymin), 8, H - 10);
+  const tag = settings.scale === "hold" || (settings.scale === "mvc" && !s.cal) ? "peak hold · tap to reset"
+    : settings.scale === "mvc" ? "scaled to MVC" : "";
+  if (tag) { g.textAlign = "right"; g.fillText(tag, W - 8, 16); g.textAlign = "left"; }
+}
+
+/* ---- spectrum (FFT of the newest 1024 filtered samples) ---- */
+
+const FFT_N = 1024;
+const HANN = Float64Array.from({ length: FFT_N }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_N - 1)));
+function fftMag(input) {
+  const n = input.length, re = Float64Array.from(input), im = new Float64Array(n);
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        [cr, ci] = [cr * wr - ci * wi, cr * wi + ci * wr];
+      }
+    }
+  }
+  const mag = new Float32Array(n / 2);
+  for (let i = 0; i < n / 2; i++) mag[i] = Math.hypot(re[i], im[i]);
+  return mag;
+}
+
+function drawSpectrum(s, now) {
+  if (!settings.spectrum) return;
+  if (!s.specAt || now - s.specAt > 250) {
+    const src = settings.viewMode === "raw" ? s.raw : s.filt;
+    const x = new Float64Array(FFT_N);
+    let mean = 0, count = 0;
+    for (let i = 0; i < FFT_N; i++) { const v = src[(s.w - FFT_N + i + RING) % RING]; if (v === v) { mean += v; count++; } }
+    mean = count ? mean / count : 0;
+    for (let i = 0; i < FFT_N; i++) { const v = src[(s.w - FFT_N + i + RING) % RING]; x[i] = (v === v ? v - mean : 0) * HANN[i]; }
+    const mag = fftMag(x);
+    s.spec = s.spec ? s.spec.map((v, i) => 0.6 * v + 0.4 * mag[i]) : mag;  // light smoothing
+    s.specAt = now;
+  }
+  const p = prepCanvas(s.ui.specCanvas);
+  if (!p || !s.spec) return;
+  const { g, W, H } = p;
+  const rate = s.rate > 500 ? s.rate : FS, nyq = rate / 2, bins = s.spec.length;
+  let peak = 1e-9;
+  for (let i = 2; i < bins; i++) peak = Math.max(peak, s.spec[i]);
+  const top = 6, bottom = H - 16;
+  const Y = (v) => { const db = 20 * Math.log10(Math.max(v, 1e-9) / peak); return top + Math.min(1, -db / 50) * (bottom - top); };
+  g.strokeStyle = cssVars.grid; g.lineWidth = 1; g.beginPath();
+  g.fillStyle = cssVars.muted; g.font = "10px ui-sans-serif, system-ui, sans-serif";
+  for (let f = 0; f <= 500; f += 100) {
+    const x = Math.round(f / nyq * (W - 1)) + 0.5;
+    g.moveTo(x, top); g.lineTo(x, bottom);
+    g.textAlign = f === 0 ? "left" : f === 500 ? "right" : "center";
+    g.fillText(f + (f === 500 ? " Hz" : ""), Math.min(W - 2, x), H - 3);
+  }
+  g.stroke(); g.textAlign = "left";
+  g.fillStyle = s.colorResolved || "#2458d6"; g.globalAlpha = 0.35;
+  g.beginPath(); g.moveTo(0, bottom);
+  for (let i = 1; i < bins; i++) g.lineTo(i / (bins - 1) * W, Y(s.spec[i]));
+  g.lineTo(W, bottom); g.closePath(); g.fill();
+  g.globalAlpha = 1; g.strokeStyle = s.colorResolved || "#2458d6"; g.lineWidth = 1.2; g.beginPath();
+  for (let i = 1; i < bins; i++) { const x = i / (bins - 1) * W, y = Y(s.spec[i]); i === 1 ? g.moveTo(x, y) : g.lineTo(x, y); }
+  g.stroke();
+  // dominant frequency
+  let best = 2;
+  for (let i = 2; i < bins; i++) if (s.spec[i] > s.spec[best]) best = i;
+  g.fillStyle = cssVars.muted; g.textAlign = "right";
+  g.fillText(`peak ${(best * rate / FFT_N).toFixed(0)} Hz`, W - 8, 14); g.textAlign = "left";
 }
 
 function updateCardStats(s, now) {
@@ -893,7 +1082,7 @@ function updateCardStats(s, now) {
 
 let lastStats = 0;
 function frame(now) {
-  for (const s of sensors.values()) drawSensor(s);
+  for (const s of sensors.values()) { drawSensor(s); drawSpectrum(s, now); }
   if (now - lastStats > 250) {
     for (const s of sensors.values()) {
       if (!s.rateT) s.rateT = now;
@@ -1061,26 +1250,30 @@ document.addEventListener("visibilitychange", () => {
 
 function bindSettings() {
   const panel = $("#settings"), btn = $("#settingsBtn");
-  btn.setAttribute("aria-expanded", "false");
-  btn.onclick = () => { panel.hidden = !panel.hidden; btn.setAttribute("aria-expanded", String(!panel.hidden)); };
+  const show = (open) => { panel.hidden = !open; btn.setAttribute("aria-expanded", String(open)); };
+  show(store.get("settingsOpen", matchMedia("(min-width: 700px)").matches));  // open by default on wide screens
+  btn.onclick = () => { show(panel.hidden); store.set("settingsOpen", !panel.hidden); };
   const bind = (id, key, num = true) => {
-    const input = $("#" + id);
-    input.value = String(settings[key]);
+    const input = $("#" + id), check = input.type === "checkbox";
+    if (check) input.checked = !!settings[key]; else input.value = String(settings[key]);
     input.addEventListener("change", () => {
-      settings[key] = num ? +input.value : input.value;
+      settings[key] = check ? input.checked : num ? +input.value : input.value;
       saveSettings();
-      if (key === "hp" || key === "notch") for (const s of sensors.values()) s.rebuildChain();
+      if (key === "band" || key === "notch") for (const s of sensors.values()) s.rebuildChain();
+      if (key === "scale" || key === "viewMode") for (const s of sensors.values()) s.hold = null;
+      if (key === "spectrum") for (const s of sensors.values()) s.ui.spec.hidden = !settings.spectrum;
       if (key === "markerLabels" && recorder.active) renderMarkerChips();
     });
   };
-  bind("viewMode", "viewMode", false);
-  bind("notch", "notch"); bind("hp", "hp"); bind("win", "win"); bind("scale", "scale");
+  bind("viewMode", "viewMode", false); bind("band", "band", false); bind("scale", "scale", false);
+  bind("notch", "notch"); bind("win", "win");
+  bind("overlay", "overlay"); bind("spectrum", "spectrum");
   bind("markerLabels", "markerLabels", false);
 }
 
 /* ---------------- boot ---------------- */
 
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 
 function boot() {
   bindSettings();
@@ -1104,6 +1297,7 @@ function boot() {
     document.querySelectorAll('[data-action="connect"]').forEach((b) => (b.disabled = true));
   }
   if (new URLSearchParams(location.search).has("demo")) addDemoSensor();
+  restoreBleSensors();
   updateLayout();
   updateRecordingUi();
   renderRecordings();
